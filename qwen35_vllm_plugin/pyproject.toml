@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwen35-vllm-plugin"
+version = "0.1.0"
+description = "Non-invasive vLLM plugin that overrides Qwen3.5 model registration."
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qwen35_vllm_plugin*"]
+
+[project.entry-points."vllm.general_plugins"]
+qwen35_custom_model = "qwen35_vllm_plugin:register"
