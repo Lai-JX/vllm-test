@@ -35,12 +35,26 @@ OUTPUT_DIR=/workspace/project/RL-learning/vllm-test/outputs/new_merged_sweep \
 BATCH_SIZES=32,48,64 \
 INPUT_LENS=128 \
 INPUT_MODE=tokenized \
+ENABLE_VLLM_PYTHON_PROFILE=1 \
 REPEATS=3 \
 WARMUP=1 \
 /workspace/project/RL-learning/vllm-test/scripts/run_qwen35_plugin.sh benchmark-merged-smoke
 ```
 
 merged benchmark 默认保持历史行为 `INPUT_MODE=text`；设置 `INPUT_MODE=tokenized` 后，合并后的单个请求会用 `prompt_token_ids` 发送给 vLLM。
+设置 `ENABLE_VLLM_PYTHON_PROFILE=1` 后，会额外采集 vLLM Python 层关键函数的 wall time，用于解释模型 forward 外的开销。
+
+对 merged benchmark 做 e2e 对账和 timeline 分析：
+
+```bash
+TIMELINE_OUTPUT_DIR=/workspace/project/RL-learning/vllm-test/outputs/new_merged_sweep \
+/workspace/project/RL-learning/vllm-test/scripts/run_qwen35_plugin.sh analyze-timeline
+```
+
+会生成：
+
+- `accounting_summary.csv`：每个 measured request 的 e2e 对账。
+- `timeline.csv`：按相对时间排序的 benchmark / vLLM / model phase。
 
 汇总分析：
 
@@ -98,8 +112,31 @@ benchmark 默认对齐 Alpamayo 原始多模态 processor 配置：`do_rescale=T
 
 benchmark 默认显式关闭 vLLM prefix cache；只有需要做 cache 对照实验时才设置 `ENABLE_PREFIX_CACHING=1`。
 
+如果 JSONL 每行已经包含预计算视觉 embedding：
+
+- `image_embeds`：`.pt` 文件路径
+- `image_grid_thw`：`.pt` 文件路径
+
+可以开启 embedding 输入，跳过图片预处理后的 ViT forward：
+
+```bash
+ENABLE_MM_EMBEDS=1 \
+DATASET_JSONL=/workspace/project/RL-learning/vllm-test/data/alpamayo_qwen35_200/dataset.jsonl \
+DATASET_LIMIT=1 \
+BATCH_SIZES=1 \
+REPEATS=1 \
+WARMUP=1 \
+OUTPUT_DIR=/workspace/project/RL-learning/vllm-test/outputs/alpamayo_qwen35_mm_embeds \
+/workspace/project/RL-learning/vllm-test/scripts/run_qwen35_plugin.sh benchmark-merged-smoke
+```
+
+此模式会传 `enable_mm_embeds=True` 给 vLLM，并把每条样本的 `image_embeds` / `image_grid_thw` 作为 `multi_modal_data["image"]`。预期 `vit_calls=0`，适合单独观察 LLM forward 和 embedding 输入链路，不适合作为真实图片端到端结果。
+
 ## 当前结论
 
-详见 [Qwen3.5 多模态 Batch Size 性能测试](/workspace/project/RL-learning/vllm-test/docs/benchmark/qwen35_mm_bs_benchmark.md)。
+当前有两类结论文档：
 
-当前 synthetic 128-token benchmark 推荐 `bs=48`：它已达到 `bs=64` 峰值吞吐的 99% 以上，同时模型侧总耗时明显低于 `bs=64`。
+- [Qwen3.5 enable_mm_embeds 性能对比报告](/workspace/project/RL-learning/vllm-test/docs/benchmark/qwen35_enable_mm_embeds_perf_report.md)：当前主报告，基于 Alpamayo 数据、merged request、`--input-mode tokenized`，对比原图输入、不同 `OMP_NUM_THREADS` 和 `enable_mm_embeds`。
+- [Qwen3.5 多模态 Batch Size 性能测试](/workspace/project/RL-learning/vllm-test/docs/benchmark/qwen35_mm_bs_benchmark.md)：benchmark 脚本和历史 batch sweep 的说明。
+
+历史 synthetic 128-token benchmark 推荐 `bs=48`：它已达到 `bs=64` 峰值吞吐的 99% 以上，同时模型侧总耗时明显低于 `bs=64`。该结论用于 synthetic controlled sweep，不应直接替代真实 Alpamayo 数据下的结论。

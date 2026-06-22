@@ -144,3 +144,17 @@ jq -c '
 - OTel trace：保存到 `<output-dir>/otel_traces/traces.json`，适合看 vLLM 请求链路、调度和 worker 层 span。
 
 两者可以同时开，但开销会更大。做正式性能数值时建议先不开 profiler；定位瓶颈时再开 OTel 或 torch profile。
+
+如果只想解释本仓库 benchmark 的 `e2e_ms` 分解，优先使用 `--enable-vllm-python-profile` 生成的 `timeline.csv`，再用：
+
+```bash
+python /workspace/project/RL-learning/vllm-test/scripts/render_qwen35_request_timeline.py \
+  <output-dir>/timeline.csv \
+  --batch-size 2 \
+  --group-idx 0 \
+  --repeat-idx 0 \
+  --output <output-dir>/request_timeline.html \
+  --svg-output <output-dir>/request_timeline.svg
+```
+
+OTel 更适合看 vLLM 自带 tracing span；`timeline.csv` 更适合看当前脚本和插件记录到的 benchmark / vLLM / model phase 对账。

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Qwen3.5 raw OMP=8 bs=4 request timeline</title>
+  <style>
+    :root {
+      --bg: #f7f4ee;
+      --panel: #ffffff;
+      --ink: #1f2933;
+      --muted: #667085;
+      --grid: rgba(31, 41, 51, 0.12);
+      --line: rgba(31, 41, 51, 0.10);
+      --label-width: 315px;
+      --track-width: 1180px;
+      --row-height: 34px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    .shell {
+      max-width: 1580px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .hero {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px 20px;
+      box-shadow: 0 14px 34px rgba(31, 41, 51, 0.08);
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.2;
+    }
+    .meta {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      word-break: break-all;
+    }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .legend-item i {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      display: inline-block;
+    }
+    .timeline-card {
+      margin-top: 18px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: auto;
+      box-shadow: 0 14px 34px rgba(31, 41, 51, 0.08);
+    }
+    .timeline {
+      min-width: calc(var(--label-width) + var(--track-width));
+      width: calc(var(--label-width) + var(--track-width));
+      height: 1136px;
+    }
+    .axis {
+      display: grid;
+      grid-template-columns: var(--label-width) var(--track-width);
+      height: 48px;
+      border-bottom: 1px solid var(--line);
+      position: sticky;
+      top: 0;
+      background: rgba(255, 255, 255, 0.96);
+      z-index: 3;
+    }
+    .axis-title {
+      padding: 17px 14px;
+      color: var(--muted);
+      font-weight: 700;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border-right: 1px solid var(--line);
+    }
+    .axis-track {
+      position: relative;
+    }
+    .tick {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: var(--grid);
+    }
+    .tick span {
+      position: absolute;
+      top: 12px;
+      transform: translateX(-50%);
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .lane {
+      display: grid;
+      grid-template-columns: var(--label-width) var(--track-width);
+      height: var(--row-height);
+      border-bottom: 1px solid var(--line);
+    }
+    .lane-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 0 12px;
+      border-right: 1px solid var(--line);
+      background: #fbfbfa;
+      overflow: hidden;
+    }
+    .lane-label span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+    }
+    .lane-label small {
+      color: var(--muted);
+      font-size: 11px;
+      flex-shrink: 0;
+    }
+    .lane-track {
+      position: relative;
+      background-image: linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+      background-size: 147.5px 100%;
+    }
+    .bar {
+      position: absolute;
+      top: 8px;
+      height: 18px;
+      border-radius: 999px;
+      box-shadow: 0 3px 9px rgba(31, 41, 51, 0.18);
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      cursor: pointer;
+      opacity: 0.9;
+    }
+    .bar:hover {
+      opacity: 1;
+      transform: scaleY(1.18);
+      z-index: 4;
+    }
+    .tooltip {
+      position: fixed;
+      pointer-events: none;
+      max-width: 360px;
+      background: rgba(17, 24, 39, 0.94);
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.45;
+      opacity: 0;
+      transform: translateY(6px);
+      transition: opacity 100ms ease, transform 100ms ease;
+      z-index: 10;
+      box-shadow: 0 12px 30px rgba(17, 24, 39, 0.24);
+    }
+    .tooltip.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .tooltip b {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 13px;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <h1>Qwen3.5 raw OMP=8 bs=4 request timeline</h1>
+      <div class="meta">request=merged_dataset_bs4_g0_r0_d3ba943a | bs=4 | group=0 | repeat=0 | total=2872.23 ms | source=/workspace/project/RL-learning/vllm-test/outputs/perf_report_20260620_181529/raw_omp8/timeline.csv</div>
+      <div class="legend"><span class="legend-item"><i style="background:#4E79A7"></i>benchmark</span><span class="legend-item"><i style="background:#F28E2B"></i>vllm</span><span class="legend-item"><i style="background:#59A14F"></i>model</span><span class="legend-item"><i style="background:#9C755F"></i>other</span></div>
+    </section>
+    <section class="timeline-card">
+      <div class="timeline">
+        <div class="axis">
+          <div class="axis-title">Phase</div>
+          <div class="axis-track"><div class="tick" style="left:0.0000%"><span>0 ms</span></div><div class="tick" style="left:12.5000%"><span>359 ms</span></div><div class="tick" style="left:25.0000%"><span>718 ms</span></div><div class="tick" style="left:37.5000%"><span>1077 ms</span></div><div class="tick" style="left:50.0000%"><span>1436 ms</span></div><div class="tick" style="left:62.5000%"><span>1795 ms</span></div><div class="tick" style="left:75.0000%"><span>2154 ms</span></div><div class="tick" style="left:87.5000%"><span>2513 ms</span></div><div class="tick" style="left:100.0000%"><span>2872 ms</span></div></div>
+        </div>
+        <div class="lane"><div class="lane-label"><span>run_total</span><small>benchmark</small></div><div class="lane-track"><div class="bar" style="left:0.0000%;width:100.0000%;background:#4E79A7" data-tip="{&quot;phase&quot;: &quot;benchmark:run_total&quot;, &quot;component&quot;: &quot;benchmark&quot;, &quot;start_ms&quot;: 0.0, &quot;end_ms&quot;: 2872.233, &quot;wall_ms&quot;: 2872.233, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>build_prompt</span><small>benchmark</small></div><div class="lane-track"><div class="bar" style="left:0.0000%;width:0.1800%;background:#4E79A7" data-tip="{&quot;phase&quot;: &quot;benchmark:build_prompt&quot;, &quot;component&quot;: &quot;benchmark&quot;, &quot;start_ms&quot;: 0.001, &quot;end_ms&quot;: 0.025, &quot;wall_ms&quot;: 0.024, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;str&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>prepare_mm_data</span><small>benchmark</small></div><div class="lane-track"><div class="bar" style="left:0.1049%;width:3.5686%;background:#4E79A7" data-tip="{&quot;phase&quot;: &quot;benchmark:prepare_mm_data&quot;, &quot;component&quot;: &quot;benchmark&quot;, &quot;start_ms&quot;: 3.014, &quot;end_ms&quot;: 105.514, &quot;wall_ms&quot;: 102.5, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=64)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>encode_prompt</span><small>benchmark</small></div><div class="lane-track"><div class="bar" style="left:3.7814%;width:0.1800%;background:#4E79A7" data-tip="{&quot;phase&quot;: &quot;benchmark:encode_prompt&quot;, &quot;component&quot;: &quot;benchmark&quot;, &quot;start_ms&quot;: 108.611, &quot;end_ms&quot;: 111.838, &quot;wall_ms&quot;: 3.228, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1853)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>build_request</span><small>benchmark</small></div><div class="lane-track"><div class="bar" style="left:4.0016%;width:0.1800%;background:#4E79A7" data-tip="{&quot;phase&quot;: &quot;benchmark:build_request&quot;, &quot;component&quot;: &quot;benchmark&quot;, &quot;start_ms&quot;: 114.935, &quot;end_ms&quot;: 114.938, &quot;wall_ms&quot;: 0.003, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;dict(len=3)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>llm_generate</span><small>benchmark</small></div><div class="lane-track"><div class="bar" style="left:4.1058%;width:95.7900%;background:#4E79A7" data-tip="{&quot;phase&quot;: &quot;benchmark:llm_generate&quot;, &quot;component&quot;: &quot;benchmark&quot;, &quot;start_ms&quot;: 117.927, &quot;end_ms&quot;: 2869.24, &quot;wall_ms&quot;: 2751.313, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>LLM.generate</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.1058%;width:95.6916%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:LLM.generate&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 117.929, &quot;end_ms&quot;: 2866.414, &quot;wall_ms&quot;: 2748.485, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>LLM._run_completion</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.1061%;width:95.5714%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:LLM._run_completion&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 117.935, &quot;end_ms&quot;: 2862.969, &quot;wall_ms&quot;: 2745.033, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>LLM._add_completion_requests</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.1061%;width:31.3799%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:LLM._add_completion_requests&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 117.938, &quot;end_ms&quot;: 1019.243, &quot;wall_ms&quot;: 901.305, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>LLM._render_and_add_requests</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.1067%;width:31.2759%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:LLM._render_and_add_requests&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 117.954, &quot;end_ms&quot;: 1016.27, &quot;wall_ms&quot;: 898.316, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>LLM._preprocess_cmpl_one</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.1068%;width:30.4789%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:LLM._preprocess_cmpl_one&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 117.957, &quot;end_ms&quot;: 993.383, &quot;wall_ms&quot;: 875.426, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;dict(len=6)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>LLM._preprocess_cmpl</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.1069%;width:30.3600%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:LLM._preprocess_cmpl&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 117.959, &quot;end_ms&quot;: 989.97, &quot;wall_ms&quot;: 872.011, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>BaseRenderer.render_cmpl</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.1075%;width:30.2565%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:BaseRenderer.render_cmpl&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 117.977, &quot;end_ms&quot;: 987.015, &quot;wall_ms&quot;: 869.038, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>BaseRenderer.render_prompts</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.1076%;width:0.1800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:BaseRenderer.render_prompts&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 117.98, &quot;end_ms&quot;: 117.981, &quot;wall_ms&quot;: 0.002, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>BaseRenderer.tokenize_prompts</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.2175%;width:0.1800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:BaseRenderer.tokenize_prompts&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 121.137, &quot;end_ms&quot;: 121.148, &quot;wall_ms&quot;: 0.011, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>BaseRenderer.process_for_engine</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.3272%;width:29.9332%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:BaseRenderer.process_for_engine&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 124.286, &quot;end_ms&quot;: 984.038, &quot;wall_ms&quot;: 859.752, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;dict(len=6)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>BaseRenderer._process_tokens</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.3273%;width:29.8292%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:BaseRenderer._process_tokens&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 124.29, &quot;end_ms&quot;: 981.053, &quot;wall_ms&quot;: 856.764, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;dict(len=5)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>BaseRenderer._process_multimodal</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:4.3274%;width:29.7863%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:BaseRenderer._process_multimodal&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 124.293, &quot;end_ms&quot;: 979.825, &quot;wall_ms&quot;: 855.532, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;dict(len=5)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>LLM._add_request</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:34.6879%;width:0.5853%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:LLM._add_request&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 996.316, &quot;end_ms&quot;: 1013.128, &quot;wall_ms&quot;: 16.812, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;str&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>LLMEngine.add_request</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:34.6881%;width:0.4800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:LLMEngine.add_request&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 996.324, &quot;end_ms&quot;: 1010.112, &quot;wall_ms&quot;: 13.788, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;str&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>OutputProcessor.add_request</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:34.7025%;width:0.1800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:OutputProcessor.add_request&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 996.737, &quot;end_ms&quot;: 996.933, &quot;wall_ms&quot;: 0.197, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;None&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>LLM._run_engine</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:35.5895%;width:63.9841%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:LLM._run_engine&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 1022.213, &quot;end_ms&quot;: 2859.987, &quot;wall_ms&quot;: 1837.773, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>LLMEngine.step</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:35.5897%;width:63.8748%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:LLMEngine.step&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 1022.219, &quot;end_ms&quot;: 2856.851, &quot;wall_ms&quot;: 1834.632, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;list(len=1)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>Worker.execute_model</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:38.1366%;width:36.8502%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:Worker.execute_model&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 1095.371, &quot;end_ms&quot;: 2153.795, &quot;wall_ms&quot;: 1058.424, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;None&quot;}"></div><div class="bar" style="left:75.1191%;width:23.6606%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:Worker.execute_model&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 2157.596, &quot;end_ms&quot;: 2837.185, &quot;wall_ms&quot;: 679.589, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;None&quot;}"></div><div class="bar" style="left:98.9074%;width:0.1800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:Worker.execute_model&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 2840.851, &quot;end_ms&quot;: 2844.374, &quot;wall_ms&quot;: 3.522, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;ModelRunnerOutput&quot;}"></div><div class="bar" style="left:99.1419%;width:0.1800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:Worker.execute_model&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 2847.585, &quot;end_ms&quot;: 2850.956, &quot;wall_ms&quot;: 3.371, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;ModelRunnerOutput&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>GPUModelRunner.execute_model</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:38.1378%;width:36.7414%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:GPUModelRunner.execute_model&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 1095.406, &quot;end_ms&quot;: 2150.704, &quot;wall_ms&quot;: 1055.298, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;None&quot;}"></div><div class="bar" style="left:75.1197%;width:23.5558%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:GPUModelRunner.execute_model&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 2157.614, &quot;end_ms&quot;: 2834.191, &quot;wall_ms&quot;: 676.577, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;None&quot;}"></div><div class="bar" style="left:98.9081%;width:0.1800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:GPUModelRunner.execute_model&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 2840.871, &quot;end_ms&quot;: 2841.077, &quot;wall_ms&quot;: 0.206, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;ModelRunnerOutput&quot;}"></div><div class="bar" style="left:99.1424%;width:0.1800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:GPUModelRunner.execute_model&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 2847.6, &quot;end_ms&quot;: 2847.713, &quot;wall_ms&quot;: 0.114, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;ModelRunnerOutput&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>GPUModelRunner._execute_mm_encoder</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:38.2985%;width:16.9285%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:GPUModelRunner._execute_mm_encoder&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 1100.022, &quot;end_ms&quot;: 1586.248, &quot;wall_ms&quot;: 486.225, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;list(len=41)&quot;}"></div><div class="bar" style="left:75.1938%;width:9.3909%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:GPUModelRunner._execute_mm_encoder&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 2159.742, &quot;end_ms&quot;: 2429.469, &quot;wall_ms&quot;: 269.728, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;list(len=23)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>GPUModelRunner._gather_mm_embeddings</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:55.3393%;width:0.1800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:GPUModelRunner._gather_mm_embeddings&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 1589.474, &quot;end_ms&quot;: 1589.832, &quot;wall_ms&quot;: 0.358, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;tuple(len=2)&quot;}"></div><div class="bar" style="left:84.6873%;width:0.1800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:GPUModelRunner._gather_mm_embeddings&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 2432.416, &quot;end_ms&quot;: 2432.665, &quot;wall_ms&quot;: 0.249, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;tuple(len=2)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>vit_forward</span><small>model</small></div><div class="lane-track"><div class="bar" style="left:38.5528%;width:16.6270%;background:#59A14F" data-tip="{&quot;phase&quot;: &quot;vit_forward&quot;, &quot;component&quot;: &quot;model&quot;, &quot;start_ms&quot;: 1107.327, &quot;end_ms&quot;: 1584.894, &quot;wall_ms&quot;: 477.567, &quot;cuda_ms&quot;: 473.895, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;Tensor(shape=(7380, 2048), dtype=torch.bfloat16, device=cuda:0)&quot;}"></div><div class="bar" style="left:75.2837%;width:9.2442%;background:#59A14F" data-tip="{&quot;phase&quot;: &quot;vit_forward&quot;, &quot;component&quot;: &quot;model&quot;, &quot;start_ms&quot;: 2162.323, &quot;end_ms&quot;: 2427.837, &quot;wall_ms&quot;: 265.515, &quot;cuda_ms&quot;: 263.389, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;Tensor(shape=(4140, 2048), dtype=torch.bfloat16, device=cuda:0)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>qwen_forward</span><small>model</small></div><div class="lane-track"><div class="bar" style="left:55.4699%;width:19.2889%;background:#59A14F" data-tip="{&quot;phase&quot;: &quot;qwen_forward&quot;, &quot;component&quot;: &quot;model&quot;, &quot;start_ms&quot;: 1593.224, &quot;end_ms&quot;: 2147.246, &quot;wall_ms&quot;: 554.023, &quot;cuda_ms&quot;: 553.344, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;Tensor(shape=(8192, 2048), dtype=torch.bfloat16, device=cuda:0)&quot;}"></div><div class="bar" style="left:84.8086%;width:13.7615%;background:#59A14F" data-tip="{&quot;phase&quot;: &quot;qwen_forward&quot;, &quot;component&quot;: &quot;model&quot;, &quot;start_ms&quot;: 2435.9, &quot;end_ms&quot;: 2831.163, &quot;wall_ms&quot;: 395.263, &quot;cuda_ms&quot;: 394.968, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;Tensor(shape=(5117, 2048), dtype=torch.bfloat16, device=cuda:0)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>llm_forward</span><small>model</small></div><div class="lane-track"><div class="bar" style="left:55.4712%;width:19.1766%;background:#59A14F" data-tip="{&quot;phase&quot;: &quot;llm_forward&quot;, &quot;component&quot;: &quot;model&quot;, &quot;start_ms&quot;: 1593.263, &quot;end_ms&quot;: 2144.06, &quot;wall_ms&quot;: 550.797, &quot;cuda_ms&quot;: 550.234, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;Tensor(shape=(8192, 2048), dtype=torch.bfloat16, device=cuda:0)&quot;}"></div><div class="bar" style="left:84.8098%;width:13.6523%;background:#59A14F" data-tip="{&quot;phase&quot;: &quot;llm_forward&quot;, &quot;component&quot;: &quot;model&quot;, &quot;start_ms&quot;: 2435.934, &quot;end_ms&quot;: 2828.059, &quot;wall_ms&quot;: 392.125, &quot;cuda_ms&quot;: 391.929, &quot;pid&quot;: &quot;174100&quot;, &quot;output&quot;: &quot;Tensor(shape=(5117, 2048), dtype=torch.bfloat16, device=cuda:0)&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>OutputProcessor.process_outputs</span><small>vllm</small></div><div class="lane-track"><div class="bar" style="left:99.1737%;width:0.1800%;background:#F28E2B" data-tip="{&quot;phase&quot;: &quot;vllm:OutputProcessor.process_outputs&quot;, &quot;component&quot;: &quot;vllm&quot;, &quot;start_ms&quot;: 2848.499, &quot;end_ms&quot;: 2851.021, &quot;wall_ms&quot;: 2.523, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;OutputProcessorOutput&quot;}"></div></div></div><div class="lane"><div class="lane-label"><span>cuda_sync</span><small>benchmark</small></div><div class="lane-track"><div class="bar" style="left:99.9975%;width:0.1800%;background:#4E79A7" data-tip="{&quot;phase&quot;: &quot;benchmark:cuda_sync&quot;, &quot;component&quot;: &quot;benchmark&quot;, &quot;start_ms&quot;: 2872.161, &quot;end_ms&quot;: 2872.233, &quot;wall_ms&quot;: 0.072, &quot;cuda_ms&quot;: null, &quot;pid&quot;: &quot;174016&quot;, &quot;output&quot;: &quot;None&quot;}"></div></div></div>
+      </div>
+    </section>
+  </main>
+  <div class="tooltip" id="tooltip"></div>
+  <script>
+    const tooltip = document.getElementById('tooltip');
+    document.querySelectorAll('.bar').forEach((bar) => {
+      bar.addEventListener('mousemove', (event) => {
+        const data = JSON.parse(bar.dataset.tip);
+        tooltip.innerHTML = `<b>${data.phase}</b>`
+          + `<div>component: ${data.component}</div>`
+          + `<div>start: ${data.start_ms} ms</div>`
+          + `<div>end: ${data.end_ms} ms</div>`
+          + `<div>wall: ${data.wall_ms} ms</div>`
+          + (data.cuda_ms === null ? '' : `<div>cuda: ${data.cuda_ms} ms</div>`)
+          + `<div>pid: ${data.pid}</div>`
+          + `<div>output: ${data.output}</div>`;
+        const pad = 14;
+        tooltip.style.left = Math.min(event.clientX + pad, window.innerWidth - 380) + 'px';
+        tooltip.style.top = Math.min(event.clientY + pad, window.innerHeight - 180) + 'px';
+        tooltip.classList.add('visible');
+      });
+      bar.addEventListener('mouseleave', () => {
+        tooltip.classList.remove('visible');
+      });
+    });
+  </script>
+</body>
+</html>

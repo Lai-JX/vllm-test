@@ -32,6 +32,7 @@ os.environ.setdefault("VLLM_PLUGINS", "qwen35_custom_model")
 os.environ.setdefault("QWEN35_PLUGIN_PROFILE", "1")
 os.environ.setdefault("QWEN35_PLUGIN_PROFILE_SYNC", "1")
 
+import torch  # noqa: E402
 from PIL import Image  # noqa: E402
 from vllm import LLM, SamplingParams  # noqa: E402
 
@@ -118,6 +119,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not pass do_rescale=True to the multimodal processor.",
     )
+    parser.add_argument(
+        "--enable-mm-embeds",
+        action="store_true",
+        help=(
+            "Use precomputed image embeddings from dataset JSONL rows instead "
+            "of raw images. Each row must contain `image_embeds` and "
+            "`image_grid_thw` paths to .pt files."
+        ),
+    )
     parser.add_argument("--image", default=None, help="Synthetic fallback image path.")
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument(
@@ -132,6 +142,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--repeats must be positive")
     if args.warmup < 0:
         parser.error("--warmup must be non-negative")
+    if args.enable_mm_embeds and not args.dataset_jsonl:
+        parser.error("--enable-mm-embeds requires --dataset-jsonl")
     return args
 
 
@@ -218,7 +230,12 @@ def materialize_request(
 
     request["multi_modal_data"] = clone_value(sample["multi_modal_data"])
     images = request["multi_modal_data"].get("image")
-    if isinstance(images, list):
+    if isinstance(images, dict) and "image_grid_thw" in images:
+        image_count = int(images["image_grid_thw"].shape[0])
+        request["multi_modal_uuids"] = {
+            "image": [f"{request_id}_image{idx}" for idx in range(image_count)]
+        }
+    elif isinstance(images, list):
         request["multi_modal_uuids"] = {
             "image": [f"{request_id}_image{idx}" for idx in range(len(images))]
         }
@@ -248,6 +265,15 @@ def _resolve_image_paths(dataset_path: Path, record: dict[str, Any]) -> list[str
     return paths
 
 
+def _resolve_pt_path(dataset_path: Path, raw_path: Any, field_name: str) -> str:
+    if not raw_path:
+        raise ValueError(f"dataset row is missing {field_name}")
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = dataset_path.parent / path
+    return str(path)
+
+
 def _prompt_from_dataset_record(record: dict[str, Any], image_count: int) -> str:
     if record.get("prompt"):
         return str(record["prompt"])
@@ -263,7 +289,12 @@ def _prompt_from_dataset_record(record: dict[str, Any], image_count: int) -> str
     )
 
 
-def infer_dataset_max_images(dataset_jsonl: str, limit: int) -> int:
+def infer_dataset_max_images(
+    dataset_jsonl: str,
+    limit: int,
+    *,
+    enable_mm_embeds: bool = False,
+) -> int:
     dataset_path = Path(dataset_jsonl)
     max_images = 1
     seen = 0
@@ -274,7 +305,18 @@ def infer_dataset_max_images(dataset_jsonl: str, limit: int) -> int:
             if not line.strip():
                 continue
             record = json.loads(line)
-            max_images = max(max_images, len(_resolve_image_paths(dataset_path, record)))
+            if enable_mm_embeds:
+                image_grid_thw = torch.load(
+                    _resolve_pt_path(
+                        dataset_path,
+                        record.get("image_grid_thw"),
+                        "image_grid_thw",
+                    ),
+                    map_location="cpu",
+                )
+                max_images = max(max_images, int(image_grid_thw.shape[0]))
+            else:
+                max_images = max(max_images, len(_resolve_image_paths(dataset_path, record)))
             seen += 1
     return max_images
 
@@ -285,6 +327,7 @@ def load_dataset_samples(
     *,
     input_mode: str,
     limit: int,
+    enable_mm_embeds: bool = False,
 ) -> list[dict[str, Any]]:
     dataset_path = Path(dataset_jsonl)
     samples: list[dict[str, Any]] = []
@@ -295,17 +338,39 @@ def load_dataset_samples(
             if not line.strip():
                 continue
             record = json.loads(line)
-            image_paths = _resolve_image_paths(dataset_path, record)
-            images = [load_image(path, size=0) for path in image_paths]
+            if enable_mm_embeds:
+                image_embeds = torch.load(
+                    _resolve_pt_path(dataset_path, record.get("image_embeds"), "image_embeds"),
+                    map_location="cpu",
+                )
+                image_grid_thw = torch.load(
+                    _resolve_pt_path(dataset_path, record.get("image_grid_thw"), "image_grid_thw"),
+                    map_location="cpu",
+                )
+                if image_grid_thw.ndim != 2:
+                    raise ValueError(
+                        "image_grid_thw must have shape (num_images, 3), "
+                        f"got {tuple(image_grid_thw.shape)}"
+                    )
+                image_count = int(image_grid_thw.shape[0])
+                image_data: Any = {
+                    "image_embeds": image_embeds,
+                    "image_grid_thw": image_grid_thw,
+                }
+            else:
+                image_paths = _resolve_image_paths(dataset_path, record)
+                images = [load_image(path, size=0) for path in image_paths]
+                image_count = len(images)
+                image_data = images if len(images) > 1 else images[0]
             sample: dict[str, Any] = {
                 "cid": str(record.get("id") or record.get("cid") or line_idx),
                 "source": "dataset",
-                "multi_modal_data": {"image": images if len(images) > 1 else images[0]},
+                "multi_modal_data": {"image": image_data},
             }
             if record.get("prompt_token_ids") is not None:
                 sample["prompt_token_ids"] = [int(token_id) for token_id in record["prompt_token_ids"]]
             else:
-                prompt = _prompt_from_dataset_record(record, len(images))
+                prompt = _prompt_from_dataset_record(record, image_count)
                 sample["prompt_base"] = prompt
                 if input_mode == "tokenized":
                     sample["prompt_token_ids"] = _encode_no_specials(tokenizer, prompt)
@@ -442,6 +507,7 @@ def run_one_batch(
     is_warmup: bool,
     source: str,
     input_mode: str,
+    enable_mm_embeds: bool,
 ) -> tuple[dict[str, Any], int]:
     group_id = f"{source}_bs{batch_size}_g{group_idx}_r{repeat_idx}_{uuid.uuid4().hex[:8]}"
     os.environ["QWEN35_PLUGIN_REQUEST_ID"] = group_id
@@ -519,6 +585,7 @@ def run_one_batch(
         "qwen_forward_calls": phase_count(records, "qwen_forward"),
         "completion_tokens": sum(completion_token_count(output) for output in outputs),
         "input_mode": input_mode,
+        "enable_mm_embeds": enable_mm_embeds,
         "request_ids_unique": len(set(request_ids)) == len(request_ids),
         "unique_request_count": len(set(request_ids)),
         "unique_request_ids": ";".join(request_ids),
@@ -540,7 +607,11 @@ def main() -> None:
 
     os.environ["QWEN35_PLUGIN_PROFILE_PATH"] = str(profile_path)
     max_images_per_prompt = (
-        infer_dataset_max_images(args.dataset_jsonl, args.dataset_limit)
+        infer_dataset_max_images(
+            args.dataset_jsonl,
+            args.dataset_limit,
+            enable_mm_embeds=args.enable_mm_embeds,
+        )
         if args.dataset_jsonl
         else 1
     )
@@ -558,6 +629,7 @@ def main() -> None:
         },
         "enforce_eager": not args.disable_enforce_eager,
         "enable_prefix_caching": args.enable_prefix_caching,
+        "enable_mm_embeds": args.enable_mm_embeds,
     }
     if args.max_num_batched_tokens > 0:
         llm_kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
@@ -580,6 +652,7 @@ def main() -> None:
             tokenizer,
             input_mode=args.input_mode,
             limit=args.dataset_limit,
+            enable_mm_embeds=args.enable_mm_embeds,
         )
         for batch_size in batch_sizes:
             if batch_size <= 0:
@@ -599,6 +672,7 @@ def main() -> None:
                     is_warmup=True,
                     source=source,
                     input_mode=args.input_mode,
+                    enable_mm_embeds=args.enable_mm_embeds,
                 )
                 enforce_global_unique_request_ids(row, seen_request_ids)
                 rows.append(row)
@@ -619,6 +693,7 @@ def main() -> None:
                         is_warmup=False,
                         source=source,
                         input_mode=args.input_mode,
+                        enable_mm_embeds=args.enable_mm_embeds,
                     )
                     enforce_global_unique_request_ids(row, seen_request_ids)
                     rows.append(row)
@@ -648,6 +723,7 @@ def main() -> None:
                         is_warmup=is_warmup,
                         source=source,
                         input_mode=args.input_mode,
+                        enable_mm_embeds=False,
                     )
                     enforce_global_unique_request_ids(row, seen_request_ids)
                     rows.append(row)

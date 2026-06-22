@@ -2,6 +2,14 @@
 
 本文档记录 `/workspace/project/RL-learning/vllm-test` 下现有的离线 benchmark 链路，用于测试 Qwen3.5 多模态模型在不同 batch size 下的性能。当前推荐把 batch size 作为主要自变量；输入 token 数接口仍保留，主要用于 synthetic controlled sweep。
 
+当前真实 Alpamayo 数据、merged request、`enable_mm_embeds` 对比的主报告见：
+
+```text
+/workspace/project/RL-learning/vllm-test/docs/benchmark/qwen35_enable_mm_embeds_perf_report.md
+```
+
+本文后半部分的 synthetic 结果是历史 controlled sweep，用于说明普通 offline batch 的平台点，不代表真实图片端到端链路的最终结论。
+
 ## 测试目标
 
 主要观测指标：
@@ -13,7 +21,8 @@
 - `vit_cuda_first_ms` / `llm_cuda_first_ms` / `qwen_forward_cuda_first_ms`：当前 `llm.generate(...)` 调用内对应阶段第一条记录的 CUDA 时间，用于区分一次请求内多次 phase 调用时的首个阶段耗时。
 - `model_total_cuda_first_ms`：当前脚本按 `vit_cuda_first_ms + qwen_forward_cuda_first_ms` 计算的首个模型侧阶段耗时。
 - `e2e_ms`：一次 `llm.generate(...)` 的端到端耗时，包含调度、预处理、模型执行、采样与输出封装。
-- `requests_per_s` / `total_requests_per_s`：请求吞吐。
+- `requests_per_s` / `total_requests_per_s`：普通 offline batch benchmark 的请求吞吐。
+- `engine_requests_per_s` / `logical_items_per_s`：merged-request benchmark 的 engine request 吞吐和 logical item 吞吐。
 - `prompt_tokens_per_s` / `total_prompt_tokens_per_s`：输入 token 吞吐。
 
 输出文件：
@@ -59,6 +68,19 @@ benchmark 脚本的全局 `mm_processor_kwargs` 默认对齐 `/share/models/Alpa
 ```
 
 如果需要做不同图像像素预算的对照实验，可以设置 `MM_MIN_PIXELS`、`MM_MAX_PIXELS` 或 `DISABLE_MM_DO_RESCALE=1`，也可以直接给 Python 脚本传 `--mm-min-pixels`、`--mm-max-pixels`、`--disable-mm-do-rescale`。
+
+如果 JSONL 每行已经包含预计算视觉 embedding，也可以设置：
+
+```bash
+ENABLE_MM_EMBEDS=1
+```
+
+这会给 vLLM 传 `enable_mm_embeds=True`，并要求每条样本包含：
+
+- `image_embeds`：`.pt` 文件路径。
+- `image_grid_thw`：`.pt` 文件路径。
+
+该模式会跳过 ViT，适合拆分分析 ViT 之后的链路；它不代表完整图片端到端性能。
 
 ## 真实数据集模式
 
@@ -123,20 +145,110 @@ INPUT_MODE=tokenized
 
 此时脚本会先把 logical batch 合并成单个 prompt，再把该 merged prompt 编码成 `prompt_token_ids` 作为一个 vLLM 请求发送；图片合并和 `multi_modal_uuids` 逻辑不变。
 
-## 避免 Cache Hit
+## 额外 vLLM Python 计时
 
-benchmark 已显式关闭 vLLM prefix cache，因此不再通过向 prompt 注入 nonce 来制造文本差异。为了避免多次发送相同图片而命中多模态 cache，脚本仍会给每个请求构造唯一 request id，并设置：
+如果 OTel 的 request-level 信息还不够，可以在 merged benchmark 中打开轻量 Python wall-time 计时：
 
-```python
-multi_modal_uuids = {"image": request_id}
+```bash
+ENABLE_VLLM_PYTHON_PROFILE=1 \
+/workspace/project/RL-learning/vllm-test/scripts/run_qwen35_plugin.sh benchmark-merged-smoke
 ```
 
-这样即使图片内容相同，不同请求也不会复用相同的多模态 UUID。
+或直接传 Python 参数：
+
+```bash
+--enable-vllm-python-profile
+```
+
+这不会修改 vLLM 源码，而是通过插件在运行时给关键函数加 wrapper。原始记录会写入 `profile_records.jsonl`，并在 `summary.csv` / `aggregate_summary.csv` 中增加若干列，例如：
+
+- `benchmark_build_prompt_wall_ms`
+- `benchmark_prepare_mm_data_wall_ms`
+- `benchmark_encode_prompt_wall_ms`
+- `benchmark_llm_generate_wall_ms`
+- `benchmark_cuda_sync_wall_ms`
+- `benchmark_e2e_accounted_wall_ms`
+- `benchmark_e2e_residual_wall_ms`
+- `benchmark_run_total_wall_ms`
+- `vllm_run_engine_wall_sum_ms`
+- `vllm_add_completion_requests_wall_sum_ms`
+- `vllm_preprocess_cmpl_wall_sum_ms`
+- `vllm_renderer_render_cmpl_wall_sum_ms`
+- `vllm_renderer_tokenize_prompts_wall_sum_ms`
+- `vllm_renderer_process_for_engine_wall_sum_ms`
+- `vllm_renderer_process_tokens_wall_sum_ms`
+- `vllm_renderer_process_multimodal_wall_sum_ms`
+- `vllm_engine_step_wall_sum_ms`
+- `vllm_process_outputs_wall_sum_ms`
+- `vllm_worker_execute_model_wall_sum_ms`
+- `vllm_gpu_execute_model_wall_sum_ms`
+- `vllm_execute_mm_encoder_wall_sum_ms`
+- `vllm_gather_mm_embeddings_wall_sum_ms`
+
+这些指标用于解释 `e2e_ms` 中模型 forward 之外的 Python/vLLM 调度链路开销；它们是 wall time，不能替代 torch profile 的 kernel/op 级分析，也不能替代插件已有的 `vit_cuda_*` / `llm_cuda_*` CUDA 计时。
+
+进一步生成 e2e 对账和 timeline：
+
+```bash
+TIMELINE_OUTPUT_DIR=<output-dir> \
+/workspace/project/RL-learning/vllm-test/scripts/run_qwen35_plugin.sh analyze-timeline
+```
+
+输出：
+
+- `accounting_summary.csv`：按 request 汇总 `e2e_ms`、`benchmark_e2e_accounted_wall_ms`、`benchmark_e2e_residual_wall_ms`、`model_total_wall_sum_ms`、`e2e_minus_model_total_wall_ms`。
+- `timeline.csv`：按 `benchmark:run_total` 起点排序展示 benchmark / vLLM / model phase 的 `start_rel_ms`、`end_rel_ms`、`wall_ms`。
+
+当前正式示例输出：
+
+```text
+/workspace/project/RL-learning/vllm-test/outputs/perf_report_20260620_181529
+```
+
+该目录包含原图输入、不同 `OMP_NUM_THREADS`、`enable_mm_embeds` 的 merged-request 对比结果。详细解读见：
+
+```text
+/workspace/project/RL-learning/vllm-test/docs/benchmark/qwen35_enable_mm_embeds_perf_report.md
+```
+
+从 `accounting_summary.csv` 看，`e2e_ms` 可以被 benchmark 层的非重叠阶段基本闭合；如果 `e2e_ms` 明显大于 `renderer_mm_ms + vit_ms + llm_ms`，差值通常来自 vLLM 的 request add、engine step、worker execute、输出处理，以及 CUDA event 计时和 Python wall time 的口径差异。
+
+如果要进一步拆 `vllm_preprocess_cmpl_wall_sum_ms`，新版本还会记录 renderer 内部阶段。重点看：
+
+- `vllm_renderer_render_prompts_wall_sum_ms`
+- `vllm_renderer_tokenize_prompts_wall_sum_ms`
+- `vllm_renderer_process_for_engine_wall_sum_ms`
+- `vllm_renderer_process_tokens_wall_sum_ms`
+- `vllm_renderer_process_multimodal_wall_sum_ms`
+
+其中最可疑的是 `vllm_renderer_process_multimodal_wall_sum_ms`，它对应 `Renderer._process_multimodal(...) -> mm_processor.apply(...)`，通常包含图片 resize / rescale / normalize / placeholder 对齐 / 多模态输入构造。
+
+如果需要把 `timeline.csv` 渲染成更直观的请求时间线，可以使用：
+
+```bash
+python /workspace/project/RL-learning/vllm-test/scripts/render_qwen35_request_timeline.py \
+  /workspace/project/RL-learning/vllm-test/outputs/perf_report_20260620_181529/raw_omp8/timeline.csv \
+  --batch-size 2 \
+  --group-idx 0 \
+  --repeat-idx 0 \
+  --output /workspace/project/RL-learning/vllm-test/docs/benchmark/assets/qwen35_enable_mm_embeds/raw_omp8_bs2_timeline.html \
+  --svg-output /workspace/project/RL-learning/vllm-test/docs/benchmark/assets/qwen35_enable_mm_embeds/raw_omp8_bs2_timeline.svg
+```
+
+## 避免 Cache Hit
+
+benchmark 已显式关闭 vLLM prefix cache，因此不再通过向 prompt 注入 nonce 来制造文本差异。为了避免多次发送相同图片而命中多模态 cache，脚本仍会给每次多模态输入构造唯一 UUID，并设置：
+
+```python
+multi_modal_uuids = {"image": mm_uuids}
+```
+
+这样即使图片内容相同，不同请求也不会复用相同的多模态 UUID。merged-request 场景下，一个 engine request 内可能包含多张图片，因此 `mm_uuids` 是按图片数量展开的列表。
 
 脚本内还有全局唯一性校验：
 
-- `request_ids_unique`：单个 batch 内 request id 是否唯一。
-- `request_ids_unique_global`：本次运行中是否和之前所有 batch 的 request id 重复。
+- `mm_uuids_unique`：单个 batch 内多模态 UUID 是否唯一。
+- `mm_uuids_unique_global`：本次运行中是否和之前所有 batch 的多模态 UUID 重复。
 - 如果发现重复，会直接抛 `RuntimeError`，避免继续产出无效性能数据。
 
 不建议删除 `multi_modal_uuids` 逻辑。只有在明确想观察多模态 cache 命中行为时，才应手动去掉这部分 UUID 设置。
@@ -162,7 +274,7 @@ PLATEAU_RATIO=0.97 \
 
 `PLATEAU_RATIO=0.97` 的含义是：推荐吞吐达到最佳吞吐 97% 以上的最小 batch size。这个策略用于避免只为了很小的吞吐提升而选择过大的 batch size。
 
-## 当前 Synthetic 结果
+## 历史 Synthetic 结果
 
 新版 synthetic 128-token prompt 已完成两轮正式 sweep，所有 measured row 都满足 `request_ids_unique_global=True`。
 
@@ -194,14 +306,14 @@ PLATEAU_RATIO=0.97 \
 
 - synthetic 场景下吞吐在 `bs=48` 后进入平台区。
 - `bs=64` 的吞吐最高，但只比 `bs=48` 高约 0.6%。
-- `bs=48` 已达到峰值 97% 以上，同时 `model_total_ms` 明显低于 `bs=64`，因此当前推荐 `bs=48`。
+- `bs=48` 已达到峰值 97% 以上，同时 `model_total_ms` 明显低于 `bs=64`，因此 synthetic controlled sweep 推荐 `bs=48`。
 - `bs=32` 已经接近平台区，但合并结果约为 `47.76 req/s`，低于 `bs=48` 约 6.4%。
 
-补充对照：旧的 `max_num_batched_tokens=16384` 试验没有带来明显收益，`bs=32` 更慢，`bs=48` 与 default 接近；当前推荐继续使用 default 配置。
+补充对照：旧的 `max_num_batched_tokens=16384` 试验没有带来明显收益，`bs=32` 更慢，`bs=48` 与 default 接近；synthetic 场景继续使用 default 配置。
 
 ## 建议的下一步
 
-1. 先用真实数据集跑 `bs=32,40,48,64`，确认真实图片和文本分布下的平台点。
-2. 如果 `bs=64` 仍继续上涨，再追加 `bs=80,96`；如果显存或延迟压力明显，则收缩到 `bs=32,40,48`。
-3. 用 analyze 模式汇总 dataset 结果，并优先看 `total_requests_per_s`、`avg_per_request_e2e_ms`、`avg_vit_cuda_sum_ms`、`avg_llm_cuda_sum_ms`。
-4. 确认 `request_ids_unique_global_all=True` 后，再把结果作为可信性能数据。
+1. 真实 Alpamayo 数据下优先参考 `qwen35_enable_mm_embeds_perf_report.md`，该报告已经覆盖 `bs=1,2,4,8`、`OMP_NUM_THREADS=1/4/8` 和 `enable_mm_embeds`。
+2. 如果要把趋势变成正式数字，建议把 `dataset-limit` 提高到几十或上百，并把 `repeats` 提高到 3。
+3. 如果关注完整图片端到端性能，以原图输入路径为主；如果要拆分 ViT 之后的链路，再使用 `ENABLE_MM_EMBEDS=1`。
+4. 普通 offline batch sweep 和 merged-request sweep 的吞吐字段不同，分析时不要混合比较 `total_requests_per_s` 与 `logical_items_per_s`。

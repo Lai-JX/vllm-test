@@ -82,7 +82,9 @@ class CustomQwen35ForConditionalGeneration(Qwen3_5ForConditionalGeneration):
         self._profile_path = os.getenv("QWEN35_PLUGIN_PROFILE_PATH")
         self._profile_sync = _env_flag("QWEN35_PLUGIN_PROFILE_SYNC", True)
         self._profile_request_id = os.getenv("QWEN35_PLUGIN_REQUEST_ID", "")
-        self._profile_stacks: dict[str, list[tuple[float, torch.cuda.Event | None]]] = {
+        self._profile_stacks: dict[
+            str, list[tuple[float, float, torch.cuda.Event | None]]
+        ] = {
             "vit_forward": [],
         }
 
@@ -133,7 +135,9 @@ class CustomQwen35ForConditionalGeneration(Qwen3_5ForConditionalGeneration):
             start_event, _ = _cuda_event_pair()
             if not _record_cuda_event(start_event):
                 start_event = None
-            self._profile_stacks[phase].append((time.perf_counter(), start_event))
+            self._profile_stacks[phase].append(
+                (time.perf_counter(), time.time(), start_event)
+            )
 
         return hook
 
@@ -141,16 +145,27 @@ class CustomQwen35ForConditionalGeneration(Qwen3_5ForConditionalGeneration):
         def hook(module, inputs, output):
             if not self._profile_stacks[phase]:
                 return output
-            start_wall, start_event = self._profile_stacks[phase].pop()
+            start_wall, start_unix, start_event = self._profile_stacks[phase].pop()
             _, end_event = _cuda_event_pair()
             if not _record_cuda_event(end_event):
                 end_event = None
             _maybe_cuda_synchronize(self._profile_sync and end_event is not None)
-            wall_ms = (time.perf_counter() - start_wall) * 1000.0
+            end_wall = time.perf_counter()
+            end_unix = time.time()
+            wall_ms = (end_wall - start_wall) * 1000.0
             cuda_ms = None
             if start_event is not None and end_event is not None:
                 cuda_ms = float(start_event.elapsed_time(end_event))
-            self._write_profile_record(phase, wall_ms, cuda_ms, output)
+            self._write_profile_record(
+                phase,
+                wall_ms,
+                cuda_ms,
+                output,
+                start_perf_counter=start_wall,
+                end_perf_counter=end_wall,
+                start_unix=start_unix,
+                end_unix=end_unix,
+            )
             return output
 
         return hook
@@ -161,6 +176,11 @@ class CustomQwen35ForConditionalGeneration(Qwen3_5ForConditionalGeneration):
         wall_ms: float,
         cuda_ms: float | None,
         output: Any = None,
+        *,
+        start_perf_counter: float | None = None,
+        end_perf_counter: float | None = None,
+        start_unix: float | None = None,
+        end_unix: float | None = None,
     ) -> None:
         if not self._profile_enabled or not self._profile_path:
             return
@@ -171,6 +191,10 @@ class CustomQwen35ForConditionalGeneration(Qwen3_5ForConditionalGeneration):
             "wall_ms": wall_ms,
             "cuda_ms": cuda_ms,
             "output": self._summarize_value(output),
+            "start_perf_counter": start_perf_counter,
+            "end_perf_counter": end_perf_counter,
+            "start_unix": start_unix,
+            "end_unix": end_unix,
             "time_unix": time.time(),
         }
         with open(self._profile_path, "a", encoding="utf-8") as f:
@@ -198,6 +222,7 @@ class CustomQwen35ForConditionalGeneration(Qwen3_5ForConditionalGeneration):
             )
 
         start_wall = time.perf_counter()
+        start_unix = time.time()
         start_event, end_event = _cuda_event_pair()
         if not _record_cuda_event(start_event):
             start_event = None
@@ -206,6 +231,7 @@ class CustomQwen35ForConditionalGeneration(Qwen3_5ForConditionalGeneration):
             inputs_embeds = None
 
         llm_start_wall = time.perf_counter()
+        llm_start_unix = time.time()
         llm_start_event, llm_end_event = _cuda_event_pair()
         if not _record_cuda_event(llm_start_event):
             llm_start_event = None
@@ -221,23 +247,43 @@ class CustomQwen35ForConditionalGeneration(Qwen3_5ForConditionalGeneration):
             llm_end_event = None
         _maybe_cuda_synchronize(self._profile_sync and llm_end_event is not None)
         if self._profile_enabled:
-            llm_wall_ms = (time.perf_counter() - llm_start_wall) * 1000.0
+            llm_end_wall = time.perf_counter()
+            llm_end_unix = time.time()
+            llm_wall_ms = (llm_end_wall - llm_start_wall) * 1000.0
             llm_cuda_ms = None
             if llm_start_event is not None and llm_end_event is not None:
                 llm_cuda_ms = float(llm_start_event.elapsed_time(llm_end_event))
             self._write_profile_record(
-                "llm_forward", llm_wall_ms, llm_cuda_ms, output
+                "llm_forward",
+                llm_wall_ms,
+                llm_cuda_ms,
+                output,
+                start_perf_counter=llm_start_wall,
+                end_perf_counter=llm_end_wall,
+                start_unix=llm_start_unix,
+                end_unix=llm_end_unix,
             )
 
         if not _record_cuda_event(end_event):
             end_event = None
         _maybe_cuda_synchronize(self._profile_sync and end_event is not None)
         if self._profile_enabled:
-            wall_ms = (time.perf_counter() - start_wall) * 1000.0
+            end_wall = time.perf_counter()
+            end_unix = time.time()
+            wall_ms = (end_wall - start_wall) * 1000.0
             cuda_ms = None
             if start_event is not None and end_event is not None:
                 cuda_ms = float(start_event.elapsed_time(end_event))
-            self._write_profile_record("qwen_forward", wall_ms, cuda_ms, output)
+            self._write_profile_record(
+                "qwen_forward",
+                wall_ms,
+                cuda_ms,
+                output,
+                start_perf_counter=start_wall,
+                end_perf_counter=end_wall,
+                start_unix=start_unix,
+                end_unix=end_unix,
+            )
 
         if self._log_forward:
             logger.info("Qwen3.5 custom forward output=%s", self._summarize_value(output))

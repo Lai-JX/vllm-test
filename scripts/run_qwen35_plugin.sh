@@ -9,6 +9,7 @@ set -euo pipefail
 #   ./scripts/run_qwen35_plugin.sh benchmark-smoke
 #   ./scripts/run_qwen35_plugin.sh benchmark-merged-smoke
 #   ./scripts/run_qwen35_plugin.sh analyze
+#   ./scripts/run_qwen35_plugin.sh analyze-timeline
 #
 # Optional env overrides:
 #   MODEL_PATH=/share/models/Qwen3.5-2B
@@ -30,8 +31,10 @@ set -euo pipefail
 #   MM_MIN_PIXELS=163840
 #   MM_MAX_PIXELS=196608
 #   DISABLE_MM_DO_RESCALE=0
+#   ENABLE_MM_EMBEDS=0
 #   INPUT_MODE=tokenized
 #   ENABLE_PREFIX_CACHING=0
+#   ENABLE_VLLM_PYTHON_PROFILE=0
 #   OTLP_TRACES_ENDPOINT=http://localhost:4317
 #   OTLP_TRACES_PROTOCOL=grpc
 #   COLLECT_DETAILED_TRACES=all
@@ -41,6 +44,7 @@ set -euo pipefail
 #   ANALYZE_INPUTS="/path/to/run1 /path/to/run2"
 #   ANALYZE_OUTPUT_DIR=/workspace/project/RL-learning/vllm-test/outputs/benchmark_qwen35_mm_bs_sweep_combined
 #   PLATEAU_RATIO=0.97
+#   TIMELINE_OUTPUT_DIR=/workspace/project/RL-learning/vllm-test/outputs/accounting_smoke
 
 MODE="${1:-online}"
 
@@ -94,6 +98,9 @@ case "${MODE}" in
     if [[ "${DISABLE_MM_DO_RESCALE:-0}" == "1" ]]; then
       cmd+=(--disable-mm-do-rescale)
     fi
+    if [[ "${ENABLE_MM_EMBEDS:-0}" == "1" ]]; then
+      cmd+=(--enable-mm-embeds)
+    fi
     if [[ "${ENABLE_PREFIX_CACHING:-0}" == "1" ]]; then
       cmd+=(--enable-prefix-caching)
     fi
@@ -127,6 +134,9 @@ case "${MODE}" in
     if [[ "${DISABLE_MM_DO_RESCALE:-0}" == "1" ]]; then
       cmd+=(--disable-mm-do-rescale)
     fi
+    if [[ "${ENABLE_MM_EMBEDS:-0}" == "1" ]]; then
+      cmd+=(--enable-mm-embeds)
+    fi
     if [[ "${ENABLE_PREFIX_CACHING:-0}" == "1" ]]; then
       cmd+=(--enable-prefix-caching)
     fi
@@ -135,6 +145,9 @@ case "${MODE}" in
     fi
     if [[ -n "${DATASET_LIMIT:-}" ]]; then
       cmd+=(--dataset-limit "${DATASET_LIMIT}")
+    fi
+    if [[ "${ENABLE_VLLM_PYTHON_PROFILE:-0}" == "1" ]]; then
+      cmd+=(--enable-vllm-python-profile)
     fi
     if [[ -n "${OTLP_TRACES_ENDPOINT:-}" ]]; then
       cmd+=(--otlp-traces-endpoint "${OTLP_TRACES_ENDPOINT}")
@@ -158,9 +171,14 @@ case "${MODE}" in
     python /workspace/project/RL-learning/vllm-test/scripts/analyze_qwen35_bs_sweep.py       "${analyze_inputs[@]}"       --output-dir "${ANALYZE_OUTPUT_DIR:-/workspace/project/RL-learning/vllm-test/outputs/benchmark_qwen35_mm_bs_sweep_combined}"       --plateau-ratio "${PLATEAU_RATIO:-0.97}"
     ;;
 
+  analyze-timeline)
+    python /workspace/project/RL-learning/vllm-test/scripts/analyze_qwen35_timeline.py \
+      "${TIMELINE_OUTPUT_DIR:-${OUTPUT_DIR:-/workspace/project/RL-learning/vllm-test/outputs/benchmark_qwen35_mm_merged_request_smoke}}"
+    ;;
+
   *)
     echo "Unknown mode: ${MODE}" >&2
-    echo "Usage: $0 {online|offline|benchmark-smoke|benchmark-merged-smoke|analyze}" >&2
+    echo "Usage: $0 {online|offline|benchmark-smoke|benchmark-merged-smoke|analyze|analyze-timeline}" >&2
     exit 2
     ;;
 esac

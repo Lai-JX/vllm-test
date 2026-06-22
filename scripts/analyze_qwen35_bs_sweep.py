@@ -105,9 +105,19 @@ def bool_field_any(row: dict[str, Any], keys: tuple[str, ...]) -> bool:
     return False
 
 
-def scenario_key(row: dict[str, Any]) -> tuple[str, str, str, str, int]:
+def request_mode(row: dict[str, Any]) -> str:
+    mode = str(row.get("request_mode") or "").strip()
+    if mode:
+        return mode
+    if row.get("merged_item_count") not in {None, ""}:
+        return "merged_logical_batch"
+    return "batch_requests"
+
+
+def scenario_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, int]:
     return (
         str(row["_config"]),
+        request_mode(row),
         str(row.get("source") or "unknown"),
         str(row.get("target_prompt_tokens") or "unknown"),
         str(row.get("input_mode") or "unknown"),
@@ -115,9 +125,10 @@ def scenario_key(row: dict[str, Any]) -> tuple[str, str, str, str, int]:
     )
 
 
-def recommendation_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
+def recommendation_key(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
     return (
         str(row["config"]),
+        str(row["request_mode"]),
         str(row["source"]),
         str(row["target_prompt_tokens"]),
         str(row["input_mode"]),
@@ -126,6 +137,7 @@ def recommendation_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
 
 def summarize_group(
     config: str,
+    mode: str,
     source: str,
     target_prompt_tokens: str,
     input_mode: str,
@@ -133,6 +145,14 @@ def summarize_group(
     rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     total_requests = sum(as_int(row, "request_count") for row in rows)
+    total_engine_requests = sum(
+        as_int(row, "engine_request_count", as_int(row, "request_count"))
+        for row in rows
+    )
+    total_logical_items = sum(
+        as_int(row, "merged_item_count", as_int(row, "request_count"))
+        for row in rows
+    )
     total_prompt_tokens = sum(as_int(row, "total_prompt_tokens") for row in rows)
     total_e2e_ms = sum(as_float(row, "e2e_ms") for row in rows)
 
@@ -146,6 +166,11 @@ def summarize_group(
         if len(rows) <= 1:
             return 0.0
         return statistics.stdev(as_float(row, key) for row in rows)
+
+    def stdev_any(*keys: str) -> float:
+        if len(rows) <= 1:
+            return 0.0
+        return statistics.stdev(as_float_any(row, keys) for row in rows)
 
     request_ids_unique_all = all(
         bool_field_any(row, ("request_ids_unique", "mm_uuids_unique"))
@@ -164,18 +189,51 @@ def summarize_group(
 
     return {
         "config": config,
+        "request_mode": mode,
         "source": source,
         "target_prompt_tokens": target_prompt_tokens,
         "input_mode": input_mode,
         "batch_size": batch_size,
         "measured_groups": len(rows),
         "total_requests": total_requests,
+        "total_engine_requests": total_engine_requests,
+        "total_logical_items": total_logical_items,
         "total_prompt_tokens": total_prompt_tokens,
         "total_e2e_ms": total_e2e_ms,
-        "total_requests_per_s": total_requests / (total_e2e_ms / 1000.0) if total_e2e_ms > 0 else 0.0,
-        "avg_per_request_e2e_ms": avg("per_request_e2e_ms"),
-        "stdev_per_request_e2e_ms": stdev("per_request_e2e_ms"),
-        "total_prompt_tokens_per_s": total_prompt_tokens / (total_e2e_ms / 1000.0) if total_e2e_ms > 0 else 0.0,
+        "total_requests_per_s": (
+            total_requests / (total_e2e_ms / 1000.0) if total_e2e_ms > 0 else 0.0
+        ),
+        "engine_requests_per_s": (
+            total_engine_requests / (total_e2e_ms / 1000.0)
+            if total_e2e_ms > 0
+            else 0.0
+        ),
+        "logical_items_per_s": (
+            total_logical_items / (total_e2e_ms / 1000.0)
+            if total_e2e_ms > 0
+            else 0.0
+        ),
+        "avg_per_request_e2e_ms": avg_any(
+            "per_request_e2e_ms",
+            "per_engine_request_e2e_ms",
+        ),
+        "stdev_per_request_e2e_ms": stdev_any(
+            "per_request_e2e_ms",
+            "per_engine_request_e2e_ms",
+        ),
+        "avg_per_engine_request_e2e_ms": avg_any(
+            "per_engine_request_e2e_ms",
+            "per_request_e2e_ms",
+        ),
+        "avg_per_logical_item_e2e_ms": avg_any(
+            "per_logical_item_e2e_ms",
+            "per_request_e2e_ms",
+        ),
+        "total_prompt_tokens_per_s": (
+            total_prompt_tokens / (total_e2e_ms / 1000.0)
+            if total_e2e_ms > 0
+            else 0.0
+        ),
         "avg_vit_cuda_sum_ms": avg_any("vit_cuda_sum_ms", "vit_cuda_ms"),
         "avg_llm_cuda_sum_ms": avg_any("llm_cuda_sum_ms", "llm_cuda_ms"),
         "avg_qwen_forward_cuda_sum_ms": avg_any(
@@ -208,26 +266,39 @@ def summarize_group(
 def build_recommendations(rows: list[dict[str, Any]], plateau_ratio: float) -> list[dict[str, Any]]:
     recommendations = []
     scenarios = sorted({recommendation_key(row) for row in rows})
-    for config, source, target_prompt_tokens, input_mode in scenarios:
+    for config, mode, source, target_prompt_tokens, input_mode in scenarios:
         scenario_rows = [
             row for row in rows
-            if recommendation_key(row) == (config, source, target_prompt_tokens, input_mode)
+            if recommendation_key(row) == (
+                config,
+                mode,
+                source,
+                target_prompt_tokens,
+                input_mode,
+            )
         ]
-        best = max(scenario_rows, key=lambda row: float(row["total_requests_per_s"]))
-        threshold = float(best["total_requests_per_s"]) * plateau_ratio
+        throughput_key = (
+            "logical_items_per_s"
+            if mode == "merged_logical_batch"
+            else "total_requests_per_s"
+        )
+        best = max(scenario_rows, key=lambda row: float(row[throughput_key]))
+        threshold = float(best[throughput_key]) * plateau_ratio
         plateau_rows = [
-            row for row in scenario_rows if float(row["total_requests_per_s"]) >= threshold
+            row for row in scenario_rows if float(row[throughput_key]) >= threshold
         ]
         recommended = min(plateau_rows, key=lambda row: int(row["batch_size"]))
         recommendations.append({
             "config": config,
+            "request_mode": mode,
             "source": source,
             "target_prompt_tokens": target_prompt_tokens,
             "input_mode": input_mode,
+            "throughput_metric": throughput_key,
             "best_batch_size": int(best["batch_size"]),
-            "best_requests_per_s": float(best["total_requests_per_s"]),
+            "best_requests_per_s": float(best[throughput_key]),
             "recommended_batch_size": int(recommended["batch_size"]),
-            "recommended_requests_per_s": float(recommended["total_requests_per_s"]),
+            "recommended_requests_per_s": float(recommended[throughput_key]),
             "plateau_ratio": plateau_ratio,
         })
     return recommendations
@@ -241,22 +312,38 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def write_markdown(path: Path, rows: list[dict[str, Any]], recs: list[dict[str, Any]]) -> None:
+def write_markdown(
+    path: Path,
+    rows: list[dict[str, Any]],
+    recs: list[dict[str, Any]],
+) -> None:
+    summary_header = (
+        "| config | mode | source | target | input | bs | groups | "
+        "logical_items/s | engine_req/s | per_engine_req_ms | "
+        "per_logical_item_ms | prompt_tok/s | vit_sum_ms | llm_sum_ms | "
+        "model_total_sum_ms | unique | global_unique |"
+    )
+    recommendation_header = (
+        "| config | mode | source | target | input | metric | best_bs | "
+        "best_value | recommended_bs | recommended_value | plateau_ratio |"
+    )
     lines = [
         "# Qwen3.5 vLLM Batch Sweep Analysis",
         "",
         "## Summary",
         "",
-        "| config | source | target | input | bs | groups | req/s | per_req_ms | stdev_ms | prompt_tok/s | vit_sum_ms | llm_sum_ms | model_total_sum_ms | unique | global_unique |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        summary_header,
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for row in rows:
         lines.append(
-            f"| {row['config']} | {row['source']} | {row['target_prompt_tokens']} "
-            f"| {row['input_mode']} | {row['batch_size']} | {row['measured_groups']} "
-            f"| {float(row['total_requests_per_s']):.2f} "
-            f"| {float(row['avg_per_request_e2e_ms']):.2f} "
-            f"| {float(row['stdev_per_request_e2e_ms']):.2f} "
+            f"| {row['config']} | {row['request_mode']} | {row['source']} "
+            f"| {row['target_prompt_tokens']} | {row['input_mode']} "
+            f"| {row['batch_size']} | {row['measured_groups']} "
+            f"| {float(row['logical_items_per_s']):.2f} "
+            f"| {float(row['engine_requests_per_s']):.2f} "
+            f"| {float(row['avg_per_engine_request_e2e_ms']):.2f} "
+            f"| {float(row['avg_per_logical_item_e2e_ms']):.2f} "
             f"| {float(row['total_prompt_tokens_per_s']):.0f} "
             f"| {float(row['avg_vit_cuda_sum_ms']):.2f} "
             f"| {float(row['avg_llm_cuda_sum_ms']):.2f} "
@@ -268,13 +355,14 @@ def write_markdown(path: Path, rows: list[dict[str, Any]], recs: list[dict[str, 
         "",
         "## Recommendations",
         "",
-        "| config | source | target | input | best_bs | best_req/s | recommended_bs | recommended_req/s | plateau_ratio |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|",
+        recommendation_header,
+        "|---|---|---|---|---|---|---:|---:|---:|---:|---:|",
     ])
     for rec in recs:
         lines.append(
-            f"| {rec['config']} | {rec['source']} | {rec['target_prompt_tokens']} "
-            f"| {rec['input_mode']} | {rec['best_batch_size']} "
+            f"| {rec['config']} | {rec['request_mode']} | {rec['source']} "
+            f"| {rec['target_prompt_tokens']} | {rec['input_mode']} "
+            f"| {rec['throughput_metric']} | {rec['best_batch_size']} "
             f"| {rec['best_requests_per_s']:.2f} "
             f"| {rec['recommended_batch_size']} "
             f"| {rec['recommended_requests_per_s']:.2f} "
@@ -292,16 +380,35 @@ def main() -> None:
     if not measured_rows:
         raise RuntimeError("No measured rows found in inputs.")
 
-    grouped: dict[tuple[str, str, str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[
+        tuple[str, str, str, str, str, int],
+        list[dict[str, Any]],
+    ] = defaultdict(list)
     for row in measured_rows:
         grouped[scenario_key(row)].append(row)
 
     summary_rows = [
-        summarize_group(config, source, target_prompt_tokens, input_mode, batch_size, rows)
-        for (config, source, target_prompt_tokens, input_mode, batch_size), rows in grouped.items()
+        summarize_group(
+            config,
+            mode,
+            source,
+            target_prompt_tokens,
+            input_mode,
+            batch_size,
+            rows,
+        )
+        for (
+            config,
+            mode,
+            source,
+            target_prompt_tokens,
+            input_mode,
+            batch_size,
+        ), rows in grouped.items()
     ]
     summary_rows.sort(key=lambda row: (
         row["config"] != "default",
+        str(row["request_mode"]),
         str(row["source"]),
         str(row["target_prompt_tokens"]),
         str(row["input_mode"]),
