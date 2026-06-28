@@ -1,0 +1,5 @@
+.tools/
+outputs/*
+!outputs/README.md
+data/
+__pycache__
